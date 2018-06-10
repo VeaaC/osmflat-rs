@@ -179,32 +179,49 @@ impl Iterator for BlockIndexIterator {
     }
 }
 
-pub fn read_block<F: Read + Seek, T: prost::Message + Default>(
-    reader: &mut F,
-    idx: &BlockIndex,
-) -> Result<T, Error> {
-    reader.seek(io::SeekFrom::Start(idx.blob_start as u64))?;
+#[derive(Debug)]
+pub struct BlockReader<R> {
+    buf_reader: BufReader<R>,
+    current_pos: u64,   // current position in the buf_reader
+    block_buf: Vec<u8>, // contains block data from the file
+    blob_buf: Vec<u8>,  // contains decompressed blob data from the block
+}
 
-    // TODO: allocate buffers outside of the function
-    let mut buf = Vec::new();
-    buf.resize(idx.blob_len, 0);
-    reader.read_exact(&mut buf)?;
-    let blob = Blob::decode(&buf)?;
+impl<R: Read + Seek> BlockReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            buf_reader: BufReader::new(reader),
+            current_pos: 0,
+            block_buf: Vec::new(),
+            blob_buf: Vec::new(),
+        }
+    }
 
-    let mut blob_buf = Vec::new();
-    let blob_data = if blob.raw.is_some() {
-        blob.raw.as_ref().unwrap()
-    } else if blob.zlib_data.is_some() {
-        // decompress zlib data
-        blob_buf.clear();
-        let data: &Vec<u8> = blob.zlib_data.as_ref().unwrap();
-        let mut decoder = ZlibDecoder::new(&data[..]);
-        decoder.read_to_end(&mut blob_buf)?;
-        &blob_buf
-    } else {
-        return Err(format_err!("invalid input data: unknown compression"));
-    };
-    Ok(T::decode(blob_data)?)
+    pub fn read_block<T: prost::Message + Default>(
+        &mut self,
+        idx: &BlockIndex,
+    ) -> Result<T, Error> {
+        self.current_pos = self.buf_reader
+            .seek(io::SeekFrom::Start(idx.blob_start as u64))?;
+
+        self.block_buf.resize(idx.blob_len, 0);
+        self.buf_reader.read_exact(&mut self.block_buf)?;
+        let blob = Blob::decode(&self.block_buf)?;
+
+        let blob_data = if blob.raw.is_some() {
+            blob.raw.as_ref().unwrap()
+        } else if blob.zlib_data.is_some() {
+            // decompress zlib data
+            self.blob_buf.clear();
+            let data: &Vec<u8> = blob.zlib_data.as_ref().unwrap();
+            let mut decoder = ZlibDecoder::new(&data[..]);
+            decoder.read_to_end(&mut self.blob_buf)?;
+            &self.blob_buf
+        } else {
+            return Err(format_err!("invalid input data: unknown compression"));
+        };
+        Ok(T::decode(blob_data)?)
+    }
 }
 
 /// Reads the pbf file at the given path and builds an index of block types.

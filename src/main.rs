@@ -28,7 +28,7 @@ mod stats;
 mod strings;
 
 use args::parse_args;
-use osmpbf::{build_block_index, read_block, BlockIndex, BlockType};
+use osmpbf::{build_block_index, BlockIndex, BlockReader, BlockType};
 use stats::Stats;
 use strings::StringTable;
 
@@ -258,13 +258,14 @@ fn serialize_ways(
 }
 
 fn build_relations_index<'a, F: Read + Seek, I: 'a + Iterator<Item = &'a BlockIndex>>(
-    reader: &mut F,
+    reader: F,
     block_index: I,
 ) -> Result<HashMap<i64, u32>, Error> {
+    let mut block_reader = BlockReader::new(reader);
     let mut idx = 1; // we start counting with 1, since 0 is reserved for invalid relation.
     let mut result = HashMap::new();
     for block_idx in block_index {
-        let block: osmpbf::PrimitiveBlock = read_block(reader, &block_idx)?;
+        let block: osmpbf::PrimitiveBlock = block_reader.read_block(&block_idx)?;
         for group in &block.primitivegroup {
             for relation in &group.relations {
                 result.insert(relation.id, idx);
@@ -422,12 +423,12 @@ fn run() -> Result<(), Error> {
     }
     info!("PBF block index built.");
 
-    let mut file = File::open(args.arg_input)?;
+    let mut reader = BlockReader::new(File::open(args.arg_input.clone())?);
 
     // Serialize header
     let mut index = pbf_header.ok_or_else(|| format_err!("missing header block"))?;
     let idx = index.next();
-    let pbf_header: osmpbf::HeaderBlock = read_block(&mut file, &idx.unwrap())?;
+    let pbf_header: osmpbf::HeaderBlock = reader.read_block(&idx.unwrap())?;
     serialize_header(&pbf_header, &mut builder, &mut *stringtable.borrow_mut())?;
     ensure!(
         index.next().is_none(),
@@ -453,7 +454,7 @@ fn run() -> Result<(), Error> {
         pb.message("Converting dense nodes...");
         let mut nodes = builder.start_nodes()?;
         for idx in index {
-            let block: osmpbf::PrimitiveBlock = read_block(&mut file, &idx)?;
+            let block: osmpbf::PrimitiveBlock = reader.read_block(&idx)?;
             stats += serialize_dense_nodes(&block, &mut nodes, &mut nodes_id_to_idx, &mut tags)?;
             pb.inc();
         }
@@ -478,7 +479,7 @@ fn run() -> Result<(), Error> {
         ways.grow()?; // index 0 is reserved for invalid way
 
         for idx in index {
-            let block: osmpbf::PrimitiveBlock = read_block(&mut file, &idx)?;
+            let block: osmpbf::PrimitiveBlock = reader.read_block(&idx)?;
             stats += serialize_ways(
                 &block,
                 &nodes_id_to_idx,
@@ -507,7 +508,8 @@ fn run() -> Result<(), Error> {
 
         // We need to build the index of relation ids first, since relations can refer
         // again to relations.
-        let relations_id_to_idx = build_relations_index(&mut file, index.iter())?;
+        let relations_id_to_idx =
+            build_relations_index(File::open(args.arg_input.clone())?, index.iter())?;
         info!("Relations index built.");
 
         let mut pb = ProgressBar::new(index.len() as u64);
@@ -519,7 +521,7 @@ fn run() -> Result<(), Error> {
         let mut relation_members = builder.start_relation_members()?;
 
         for idx in index {
-            let block: osmpbf::PrimitiveBlock = read_block(&mut file, &idx)?;
+            let block: osmpbf::PrimitiveBlock = reader.read_block(&idx)?;
             stats += serialize_relations(
                 &block,
                 &nodes_id_to_idx,
