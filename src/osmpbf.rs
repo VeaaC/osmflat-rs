@@ -1,10 +1,14 @@
+use bufreader::BufReader;
+
+// use buf_redux::BufReader;
 use byteorder::{ByteOrder, NetworkEndian};
 use failure::Error;
 use flate2::read::ZlibDecoder;
+use memmap::Mmap;
 use prost::{self, Message};
 
 use std::fs::File;
-use std::io::{self, BufReader, Cursor, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{self, Cursor, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 include!(concat!(env!("OUT_DIR"), "/osmpbf.rs"));
@@ -77,6 +81,7 @@ pub struct BlockIndex {
     pub block_type: BlockType,
     pub blob_start: usize,
     pub blob_len: usize,
+    pub blob_header_len: usize,
 }
 
 struct BlockIndexIterator {
@@ -91,7 +96,7 @@ impl BlockIndexIterator {
     fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = File::open(path)?;
         Ok(Self {
-            reader: BufReader::new(file),
+            reader: BufReader::with_capacity(10 * 1024 * 1024, file),
             cursor: 0,
             file_buf: Vec::new(),
             blob_buf: Vec::new(),
@@ -104,11 +109,11 @@ impl BlockIndexIterator {
         self.cursor += 4;
         self.file_buf.resize(4, 0);
         self.reader.read_exact(&mut self.file_buf)?;
-        let blob_header_len: i32 = NetworkEndian::read_i32(&self.file_buf);
+        let blob_header_len = NetworkEndian::read_i32(&self.file_buf) as usize;
 
         // read blob header
-        self.cursor += blob_header_len as usize;
-        self.file_buf.resize(blob_header_len as usize, 0);
+        self.cursor += blob_header_len;
+        self.file_buf.resize(blob_header_len, 0);
         self.reader.read_exact(&mut self.file_buf)?;
         let blob_header = BlobHeader::decode(&self.file_buf)?;
 
@@ -122,6 +127,7 @@ impl BlockIndexIterator {
                 block_type: BlockType::Header,
                 blob_start,
                 blob_len,
+                blob_header_len,
             })
         } else if blob_header.type_ == "OSMData" {
             // read blob
@@ -151,6 +157,7 @@ impl BlockIndexIterator {
                 block_type: BlockType::from_osmdata_blob(&blob_data[..])?,
                 blob_start,
                 blob_len,
+                blob_header_len,
             })
         } else {
             panic!("unknown blob type");
@@ -179,21 +186,20 @@ impl Iterator for BlockIndexIterator {
     }
 }
 
-#[derive(Debug)]
 pub struct BlockReader<R> {
     buf_reader: BufReader<R>,
-    current_pos: u64,   // current position in the buf_reader
-    block_buf: Vec<u8>, // contains block data from the file
-    blob_buf: Vec<u8>,  // contains decompressed blob data from the block
+    pos: usize,         // current position in the buf_reader
+    blob_buf: Vec<u8>,  // contains blob data from the file
+    block_buf: Vec<u8>, // contains decompressed block data from the blob
 }
 
 impl<R: Read + Seek> BlockReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            buf_reader: BufReader::new(reader),
-            current_pos: 0,
-            block_buf: Vec::new(),
+            buf_reader: BufReader::with_capacity(10 * 1024 * 1024, reader),
+            pos: 0,
             blob_buf: Vec::new(),
+            block_buf: Vec::new(),
         }
     }
 
@@ -201,27 +207,63 @@ impl<R: Read + Seek> BlockReader<R> {
         &mut self,
         idx: &BlockIndex,
     ) -> Result<T, Error> {
-        self.current_pos = self.buf_reader
-            .seek(io::SeekFrom::Start(idx.blob_start as u64))?;
+        let offset = idx.blob_start as i64 - self.pos as i64;
+        trace!(
+            "Seek in read_block: {} => {}, offset {}",
+            self.pos,
+            idx.blob_start,
+            offset
+        );
+        self.buf_reader.seek_relative(offset)?;
 
-        self.block_buf.resize(idx.blob_len, 0);
-        self.buf_reader.read_exact(&mut self.block_buf)?;
-        let blob = Blob::decode(&self.block_buf)?;
+        self.blob_buf.resize(idx.blob_len, 0);
+        self.buf_reader.read_exact(&mut self.blob_buf)?;
+        let blob = Blob::decode(&self.blob_buf)?;
 
         let blob_data = if blob.raw.is_some() {
             blob.raw.as_ref().unwrap()
         } else if blob.zlib_data.is_some() {
             // decompress zlib data
-            self.blob_buf.clear();
+            self.block_buf.clear();
             let data: &Vec<u8> = blob.zlib_data.as_ref().unwrap();
             let mut decoder = ZlibDecoder::new(&data[..]);
-            decoder.read_to_end(&mut self.blob_buf)?;
-            &self.blob_buf
+            decoder.read_to_end(&mut self.block_buf)?;
+            &self.block_buf
         } else {
             return Err(format_err!("invalid input data: unknown compression"));
         };
+
+        self.pos = idx.blob_start + idx.blob_len;
         Ok(T::decode(blob_data)?)
     }
+
+    // fn seek_relative(&mut self, offset: i64) -> io::Result<u64> {
+    //     if let Some(new_pos) = (self.pos as i64).checked_add(offset) {
+    //         if new_pos >= 0 && new_pos <= (self.buf_reader.capacity() as i64) {
+    //             self.pos = new_pos as usize;
+    //             println!("inner seek to {} with offset {}", self.pos, offset);
+    //             return self.buf_reader.get_mut().seek(SeekFrom::Current(offset));
+    //         }
+    //         self.pos = new_pos as usize;
+    //     }
+    //     println!("outer seek to {}", self.pos);
+    //     self.buf_reader.seek(SeekFrom::Current(offset))
+    // }
+
+    // // Port of the unstable feature "bufreader_seek_relative", issue = "31100".
+    // //
+    // // Note: We ported the functionality only needed for positive offsets.
+    // fn seek_forwards(&mut self, offset: usize) -> io::Result<()> {
+    //     self.pos += offset;
+    //     if offset <= self.buf_reader.buf_len() {
+    //         self.buf_reader.consume(offset);
+    //         Ok(())
+    //     } else {
+    //         self.buf_reader
+    //             .seek(SeekFrom::Current(offset as i64))
+    //             .map(|_| ())
+    //     }
+    // }
 }
 
 /// Reads the pbf file at the given path and builds an index of block types.

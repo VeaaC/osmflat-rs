@@ -1,7 +1,9 @@
+extern crate buf_redux;
 extern crate byteorder;
 extern crate bytes;
 extern crate colored;
 extern crate docopt;
+extern crate memmap;
 #[macro_use]
 extern crate failure;
 extern crate flate2;
@@ -22,6 +24,7 @@ extern crate serde_derive;
 extern crate stderrlog;
 
 mod args;
+mod bufreader;
 mod osmflat;
 mod osmpbf;
 mod stats;
