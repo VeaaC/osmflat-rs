@@ -1,4 +1,3 @@
-extern crate buf_redux;
 extern crate byteorder;
 extern crate bytes;
 extern crate colored;
@@ -24,14 +23,13 @@ extern crate serde_derive;
 extern crate stderrlog;
 
 mod args;
-mod bufreader;
 mod osmflat;
 mod osmpbf;
 mod stats;
 mod strings;
 
 use args::parse_args;
-use osmpbf::{build_block_index, BlockIndex, BlockReader, BlockType};
+use osmpbf::{BlockIndex, BlockReader, BlockType};
 use stats::Stats;
 use strings::StringTable;
 
@@ -43,8 +41,7 @@ use pbr::ProgressBar;
 
 use std::cell::RefCell;
 use std::collections::{hash_map, HashMap};
-use std::fs::File;
-use std::io::{self, Read, Seek};
+use std::io;
 use std::rc::Rc;
 use std::str;
 
@@ -260,11 +257,10 @@ fn serialize_ways(
     Ok(stats)
 }
 
-fn build_relations_index<'a, F: Read + Seek, I: 'a + Iterator<Item = &'a BlockIndex>>(
-    reader: F,
+fn build_relations_index<'a, I: 'a + Iterator<Item = &'a BlockIndex>>(
+    mut block_reader: BlockReader,
     block_index: I,
 ) -> Result<HashMap<i64, u32>, Error> {
-    let mut block_reader = BlockReader::new(reader);
     let mut idx = 1; // we start counting with 1, since 0 is reserved for invalid relation.
     let mut result = HashMap::new();
     for block_idx in block_index {
@@ -405,8 +401,10 @@ fn run() -> Result<(), Error> {
     let mut nodes_index = builder.start_nodes_index()?;
     info!("Initialized new osmflat archive at: {}", &args.arg_output);
 
+    let mut reader = BlockReader::new(args.arg_input.clone())?;
+
     info!("Building index of PBF blocks...");
-    let block_index = build_block_index(args.arg_input.clone())?;
+    let block_index = reader.build_block_index()?;
 
     // TODO: move out into a function
     let groups = block_index.into_iter().group_by(|b| b.block_type);
@@ -425,8 +423,6 @@ fn run() -> Result<(), Error> {
         }
     }
     info!("PBF block index built.");
-
-    let mut reader = BlockReader::new(File::open(args.arg_input.clone())?);
 
     // Serialize header
     let mut index = pbf_header.ok_or_else(|| format_err!("missing header block"))?;
@@ -512,7 +508,7 @@ fn run() -> Result<(), Error> {
         // We need to build the index of relation ids first, since relations can refer
         // again to relations.
         let relations_id_to_idx =
-            build_relations_index(File::open(args.arg_input.clone())?, index.iter())?;
+            build_relations_index(BlockReader::new(args.arg_input.clone())?, index.iter())?;
         info!("Relations index built.");
 
         let mut pb = ProgressBar::new(index.len() as u64);

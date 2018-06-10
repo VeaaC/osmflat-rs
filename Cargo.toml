@@ -10,7 +10,6 @@ categories = ["encoding"]
 readme = "README.md"
 
 [dependencies]
-buf_redux = "*"
 byteorder = "1.2"
 bytes = "0.4"
 colored = "1.6"
