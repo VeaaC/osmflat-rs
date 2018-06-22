@@ -515,9 +515,10 @@ fn run() -> Result<(), Error> {
         pb.message("Converting relations...");
 
         let mut relations = builder.start_relations()?;
-        relations.grow()?; // index 0 is reserved for invalid relation
-
         let mut relation_members = builder.start_relation_members()?;
+        // index 0 is reserved for invalid relation
+        relations.grow()?;
+        relation_members.grow()?;
 
         for idx in index {
             let block: osmpbf::PrimitiveBlock = reader.read_block(&idx)?;
