@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct StringTable {
@@ -20,24 +20,22 @@ impl StringTable {
     ///
     /// If the string was already inserted before, the string is deduplicated
     /// and the index to the previous string is returned.
-    pub fn insert<S: Into<String>>(&mut self, s: S) -> u32 {
-        // Horrible news, we need to clone s, even we would not need to:
-        // https://github.com/rust-lang/rust/pull/50821
-        let s = s.into();
-        let s_len = s.len();
-        match self.indexed_data.entry(s) {
-            hash_map::Entry::Occupied(entry) => *entry.into_mut(),
-            hash_map::Entry::Vacant(entry) => {
-                let idx = *entry.insert(self.size_in_bytes);
-                self.size_in_bytes = self.size_in_bytes + s_len as u32 + 1;
-                idx
-            }
+    pub fn insert<S: AsRef<str>>(&mut self, s: S) -> u32 {
+        if let Some(&idx) = self.indexed_data.get(s.as_ref()) {
+            idx
+        } else {
+            let idx = self.size_in_bytes;
+            let s = String::from(s.as_ref());
+            let s_len = s.len();
+            self.indexed_data.insert(s, idx);
+            self.size_in_bytes = idx + s_len as u32 + 1;
+            idx
         }
     }
 
     /// Pushes a string to the end of string table and returns its index.
     ///
-    /// The string is always pushed into the string table regardless of it was
+    /// The string is always pushed into the string table regardless if it was
     /// already inserted or not. Use this method for creating contiguous
     /// sequences of strings.
     pub fn push<S: Into<String>>(&mut self, s: S) -> u32 {
